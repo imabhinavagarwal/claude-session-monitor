@@ -13,15 +13,17 @@ When you run several Claude Code sessions at once, it's easy to lose track of wh
 Run it without installing:
 
 ```sh
-npx claude-session-monitor
+npx claude-code-session-monitor
 ```
 
 Or install globally:
 
 ```sh
-npm install -g claude-session-monitor
+npm install -g claude-code-session-monitor
 claude-session-monitor
 ```
+
+(The global install provides both `claude-code-session-monitor` and the shorter `claude-session-monitor` command.)
 
 Or clone and run:
 
