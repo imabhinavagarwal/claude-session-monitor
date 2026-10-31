@@ -14,6 +14,7 @@ const ROOT = path.join(process.env.HOME, '.claude', 'projects');
 const PORT = 4317;
 const WORKING_SEC = 90;        // active in last 90s = working
 const WINDOW_H = 24;           // only list sessions touched in last 24h
+const KEEP_GRACE_SEC = 600;    // keep a recently-active session even if liveness can't confirm it
 
 // Classify from last meaningful entry + age. Pure, so --check can test it.
 // 'ended' = Claude finished a turn (assistant text). scan() decides if that's really
@@ -60,10 +61,10 @@ function liveProcs() {
   return a;
 }
 
-// A session is listed only while it's open: a live claude process backs it, or cmux still
-// holds its tab (both make it clickable). A closed session has neither. When ps failed we
-// can't tell, so we list everything rather than blank the dashboard.
-function listable(click, psOk) { return !psOk || click; }
+// Keep a session only while it looks open: clickable (live proc or cmux tab), or touched within
+// KEEP_GRACE_SEC — liveness (ps/lsof/cmux) has gaps but an active session keeps writing. ps
+// failed → list everything rather than blank the dashboard.
+function listable(click, psOk, ageSec) { return !psOk || click || ageSec < KEEP_GRACE_SEC; }
 
 // Walk a shell pid up to the GUI .app that owns it, then raise it. pid is validated
 // (an integer, present in liveProcs) before it reaches here — safe to interpolate.
@@ -234,7 +235,7 @@ function scan() {
       if (bySid) pid = bySid.pid;
       else if (inLiveCwd) { const byCwd = procs.find(p => p.cwd === cwd); if (byCwd) pid = byCwd.pid; }
       const click = !!pid || cmuxMap.has(sid); // focusable: live proc in repo, or cmux holds the tab
-      if (!listable(click, _psOk)) continue;   // closed: repo has no live claude & cmux not holding → drop
+      if (!listable(click, _psOk, ageSec)) continue; // closed: no live claude, not cmux-held, not recent → drop
       out.push({
         id: sid,
         project: d.replace(/^-Users-[^-]+-/, '').replace(/-/g, '/'),
@@ -494,9 +495,10 @@ function check() {
   ok(title === 'fix the bug', 'title from first user msg');
   ok(last.role === 'assistant' && !last.isToolUse, 'last entry parsed');
   // regression: closed sessions (not clickable) are dropped when ps worked, kept when it failed
-  ok(listable(true, true) === true, 'open session listed');
-  ok(listable(false, true) === false, 'closed session dropped when ps ok');
-  ok(listable(false, false) === true, 'ps failed → list everything (no blank dashboard)');
+  ok(listable(true, true, 9999) === true, 'open session listed');
+  ok(listable(false, true, 9999) === false, 'closed + stale session dropped when ps ok');
+  ok(listable(false, true, 5) === true, 'recently-active session kept despite no liveness match');
+  ok(listable(false, false, 9999) === true, 'ps failed → list everything (no blank dashboard)');
   console.log('all checks passed');
 }
 
