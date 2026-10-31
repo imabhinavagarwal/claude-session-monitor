@@ -30,11 +30,14 @@ function classify(last, ageSec) {
 // actually-open sessions, and (b) focus a session's window on click. Memoized 8s.
 // ponytail: cwd match is coarse — many sessions per repo collapse to the newest one.
 let _live = { a: [], at: 0 };
+let _psOk = false; // did the last ps run succeed? gate the "drop closed" filter on it
 function liveProcs() {
   if (Date.now() - _live.at < 8000) return _live.a;
   const a = [];
+  let ok = false;
   try {
     const ps = cp.execSync('ps -eo pid,command', { encoding: 'utf8' }).split('\n');
+    ok = true;
     for (const ln of ps) {
       if (!/\bclaude\b/.test(ln)) continue;
       // keep only interactive session procs; drop SDK agents, plugins, mem/mcp helpers
@@ -52,9 +55,15 @@ function liveProcs() {
       a.push({ pid, cwd, sid: sm ? sm[1] : null });
     }
   } catch { /* ps unavailable */ }
+  _psOk = ok;
   _live = { a, at: Date.now() };
   return a;
 }
+
+// A session is listed only while it's open: a live claude process backs it, or cmux still
+// holds its tab (both make it clickable). A closed session has neither. When ps failed we
+// can't tell, so we list everything rather than blank the dashboard.
+function listable(click, psOk) { return !psOk || click; }
 
 // Walk a shell pid up to the GUI .app that owns it, then raise it. pid is validated
 // (an integer, present in liveProcs) before it reaches here — safe to interpolate.
@@ -213,19 +222,24 @@ function scan() {
       let status = classify(last, ageSec);
       // liveness gate: 'ended' is needs_input only if this is the open session
       // (newest transcript AND a live claude process in its cwd); else it's done.
-      const open = f === newest && cwd && liveSet.has(cwd);
-      if (status === 'ended') status = open ? 'needs_input' : 'idle';
-      // pid of the live process for this session (exact by --session-id, else newest-in-cwd) → click-to-focus
+      // claude exposes no session-id and doesn't hold the transcript open, so cwd (the repo)
+      // is the only link to a live process. Keep any session in a repo that still has a live
+      // claude; only the newest such file is the one actually at the prompt (needs_input).
+      const inLiveCwd = !!(cwd && liveSet.has(cwd));
+      const newestOpen = f === newest && inLiveCwd;
+      if (status === 'ended') status = newestOpen ? 'needs_input' : 'idle';
+      // pid for click-to-focus: exact by --session-id when present, else any live proc in the repo
       let pid = null;
       const bySid = procs.find(p => p.sid === sid);
       if (bySid) pid = bySid.pid;
-      else if (open) { const byCwd = procs.find(p => p.cwd === cwd); if (byCwd) pid = byCwd.pid; }
+      else if (inLiveCwd) { const byCwd = procs.find(p => p.cwd === cwd); if (byCwd) pid = byCwd.pid; }
+      const click = !!pid || cmuxMap.has(sid); // focusable: live proc in repo, or cmux holds the tab
+      if (!listable(click, _psOk)) continue;   // closed: repo has no live claude & cmux not holding → drop
       out.push({
         id: sid,
         project: d.replace(/^-Users-[^-]+-/, '').replace(/-/g, '/'),
         title: title || '(no prompt yet)',
-        status, ageSec: Math.round(ageSec), pid,
-        click: !!pid || cmuxMap.has(sid), // focusable: live proc, or a cmux session cmux still holds
+        status, ageSec: Math.round(ageSec), pid, click,
       });
     }
   }
@@ -479,6 +493,10 @@ function check() {
   ]);
   ok(title === 'fix the bug', 'title from first user msg');
   ok(last.role === 'assistant' && !last.isToolUse, 'last entry parsed');
+  // regression: closed sessions (not clickable) are dropped when ps worked, kept when it failed
+  ok(listable(true, true) === true, 'open session listed');
+  ok(listable(false, true) === false, 'closed session dropped when ps ok');
+  ok(listable(false, false) === true, 'ps failed → list everything (no blank dashboard)');
   console.log('all checks passed');
 }
 
