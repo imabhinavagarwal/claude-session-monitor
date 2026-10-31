@@ -1,0 +1,40 @@
+{
+  "name": "claude-session-monitor",
+  "version": "0.1.0",
+  "description": "Live dashboard of your local Claude Code sessions — see which are working, idle, or waiting on your input, and click to focus the window.",
+  "bin": {
+    "claude-session-monitor": "session-monitor.js"
+  },
+  "main": "session-monitor.js",
+  "scripts": {
+    "start": "node session-monitor.js",
+    "tui": "node session-monitor.js --tui",
+    "test": "node session-monitor.js --check"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "keywords": [
+    "claude",
+    "claude-code",
+    "anthropic",
+    "monitor",
+    "dashboard",
+    "cli",
+    "tui",
+    "sessions"
+  ],
+  "license": "MIT",
+  "author": "Abhinav Agarwal (https://github.com/imabhinavagarwal)",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imabhinavagarwal/claude-session-monitor.git"
+  },
+  "bugs": {
+    "url": "https://github.com/imabhinavagarwal/claude-session-monitor/issues"
+  },
+  "homepage": "https://github.com/imabhinavagarwal/claude-session-monitor#readme",
+  "files": [
+    "session-monitor.js"
+  ]
+}
