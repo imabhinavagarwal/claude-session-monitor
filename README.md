@@ -78,6 +78,10 @@ Everything runs locally. The monitor reads your own session files on your machin
 - Node.js 18 or newer.
 - Click-to-focus is macOS-only; the dashboard itself works anywhere Node runs.
 
+## Feedback
+
+Found a bug or have an idea? [Open an issue](https://github.com/imabhinavagarwal/claude-session-monitor/issues/new/choose) — bug reports and feature requests both have a quick template. For open-ended questions or ideas, use [Discussions](https://github.com/imabhinavagarwal/claude-session-monitor/discussions).
+
 ## License
 
 [MIT](LICENSE) © Abhinav Agarwal
