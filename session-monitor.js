@@ -512,11 +512,9 @@ function parseChromeTabs(raw) {
   }
   return tabs;
 }
-// Refreshed in the background (osascript is synchronous and can hang on the first Automation
-// prompt, so never call it inside a request — serve the cached list instead).
-// Cross-platform path: Chrome's DevTools HTTP endpoint (needs Chrome started with
-// --remote-debugging-port=9222). Works on Linux/Windows/macOS. macOS also has the osascript
-// fallback below, so it needs no flag there.
+// Chrome tabs via CDP (DevTools HTTP endpoint — any OS with --remote-debugging-port) or osascript
+// on macOS. Refreshed in the background: osascript is synchronous and can hang on the first
+// Automation prompt, so it must never run inside a request — serve the cached list.
 const CDP_PORT = process.env.CHROME_CDP_PORT || 9222;
 function cdpGet(pathname, cb) { // GET from DevTools; cb(parsedJSON) or cb(null) on any failure
   const req = http.get({ host: '127.0.0.1', port: CDP_PORT, path: pathname, timeout: 1200 }, res => {
