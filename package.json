@@ -1,6 +1,6 @@
 {
   "name": "claude-code-session-monitor",
-  "version": "0.1.4",
+  "version": "0.1.5",
   "description": "Live dashboard of your local Claude Code sessions — see which are working, idle, or waiting on your input, and click to focus the window.",
   "bin": {
     "claude-code-session-monitor": "session-monitor.js",
