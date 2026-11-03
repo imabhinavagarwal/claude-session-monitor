@@ -22,14 +22,17 @@ const KEEP_GRACE_SEC = 600;    // keep a recently-active session even if livenes
 function classify(last, ageSec) {
   if (!last) return 'idle';
   const recent = ageSec < WORKING_SEC;
-  if (last.role === 'assistant' && !last.isToolUse) return 'ended';
-  if (last.isToolUse || last.role === 'user') return recent ? 'working' : 'idle';
+  // Assistant had the last turn → the ball is in your court once it goes quiet. Plain text
+  // = Claude finished talking; a tool_use left pending (no tool_result after it) = Claude
+  // parked on a permission / question prompt. Both become 'ended' when stale, so the scan
+  // gate can flag needs_input. A recent tool_use is Claude actively running tools = working.
+  if (last.role === 'assistant') return (last.isToolUse && recent) ? 'working' : 'ended';
   return recent ? 'working' : 'idle';
 }
 
 // Live interactive `claude` processes: {pid, cwd, sid}. Used to (a) gate needs_input to
 // actually-open sessions, and (b) focus a session's window on click. Memoized 8s.
-// ponytail: cwd match is coarse — many sessions per repo collapse to the newest one.
+// ponytail: cwd match is coarse — per-repo it counts procs, not which proc owns which session.
 let _live = { a: [], at: 0 };
 let _psOk = false; // did the last ps run succeed? gate the "drop closed" filter on it
 function liveProcs() {
@@ -65,6 +68,14 @@ function liveProcs() {
 // KEEP_GRACE_SEC — liveness (ps/lsof/cmux) has gaps but an active session keeps writing. ps
 // failed → list everything rather than blank the dashboard.
 function listable(click, psOk, ageSec) { return !psOk || click || ageSec < KEEP_GRACE_SEC; }
+
+// Does an 'ended' session actually await your input? cwd is the only link to a live claude
+// (no session-id exposed), so allow the K newest transcripts in a repo where K = live claude
+// procs there — K open sessions = K prompts, not just the single newest. freshNewest keeps the
+// just-ended newest even if liveness lagged this tick; it self-heals once grace expires.
+function openForInput(rank, procsHere, inLiveCwd, freshNewest) {
+  return (inLiveCwd && rank < Math.max(procsHere, 1)) || freshNewest;
+}
 
 // Walk a shell pid up to the GUI .app that owns it, then raise it. pid is validated
 // (an integer, present in liveProcs) before it reaches here — safe to interpolate.
@@ -212,7 +223,8 @@ function scan() {
       try { stats.push({ f, m: fs.statSync(path.join(dir, f)).mtimeMs }); } catch {}
     }
     if (!stats.length) continue;
-    const newest = stats.reduce((a, b) => b.m > a.m ? b : a).f;
+    // rank each transcript by recency (0 = newest); used to map the K open sessions in a repo.
+    const rankOf = new Map(stats.slice().sort((a, b) => b.m - a.m).map((s, i) => [s.f, i]));
     for (const { f, m } of stats) {
       const ageSec = (now - m) / 1000;
       if (ageSec > WINDOW_H * 3600) continue;           // drop stale
@@ -221,14 +233,14 @@ function scan() {
       const { title, last, cwd } = parseSession(raw.split('\n'));
       const sid = f.replace('.jsonl', '');
       let status = classify(last, ageSec);
-      // liveness gate: 'ended' is needs_input only if this is the open session
-      // (newest transcript AND a live claude process in its cwd); else it's done.
-      // claude exposes no session-id and doesn't hold the transcript open, so cwd (the repo)
-      // is the only link to a live process. Keep any session in a repo that still has a live
-      // claude; only the newest such file is the one actually at the prompt (needs_input).
+      // liveness gate: an 'ended' turn is needs_input only for a session that's actually open —
+      // see openForInput. claude exposes no session-id and doesn't hold the transcript open, so
+      // cwd (the repo) is the only link to a live process.
       const inLiveCwd = !!(cwd && liveSet.has(cwd));
-      const newestOpen = f === newest && inLiveCwd;
-      if (status === 'ended') status = newestOpen ? 'needs_input' : 'idle';
+      const rank = rankOf.get(f);
+      const procsHere = procs.filter(p => p.cwd === cwd).length;
+      const freshNewest = rank === 0 && ageSec < WORKING_SEC; // just ended; liveness may lag a tick
+      if (status === 'ended') status = openForInput(rank, procsHere, inLiveCwd, freshNewest) ? 'needs_input' : 'idle';
       // pid for click-to-focus: exact by --session-id when present, else any live proc in the repo
       let pid = null;
       const bySid = procs.find(p => p.sid === sid);
@@ -485,6 +497,7 @@ function check() {
   ok(classify({ role: 'assistant', isToolUse: false }, 5) === 'ended', 'assistant text = ended (scan gates liveness)');
   ok(classify({ role: 'assistant', isToolUse: false }, 3600) === 'ended', 'old assistant text = ended too');
   ok(classify({ role: 'assistant', isToolUse: true }, 5) === 'working', 'recent tool_use = working');
+  ok(classify({ role: 'assistant', isToolUse: true }, 9999) === 'ended', 'stale tool_use = parked on a prompt (scan flags needs_input)');
   ok(classify({ role: 'user', isToolUse: false }, 5) === 'working', 'recent user = working');
   ok(classify({ role: 'user', isToolUse: false }, 9999) === 'idle', 'stale user = idle');
   ok(classify(null, 5) === 'idle', 'no entry = idle');
@@ -499,6 +512,13 @@ function check() {
   ok(listable(false, true, 9999) === false, 'closed + stale session dropped when ps ok');
   ok(listable(false, true, 5) === true, 'recently-active session kept despite no liveness match');
   ok(listable(false, false, 9999) === true, 'ps failed → list everything (no blank dashboard)');
+
+  ok(openForInput(0, 1, true, false) === true, 'single live session → open');
+  ok(openForInput(1, 2, true, false) === true, '2nd of two live procs in a repo → open');
+  ok(openForInput(1, 1, true, false) === false, '2nd session but only 1 live proc → not open');
+  ok(openForInput(2, 2, true, false) === false, '3rd session, 2 live procs → not open');
+  ok(openForInput(0, 0, false, true) === true, 'just-ended newest, liveness lagged → open');
+  ok(openForInput(0, 0, false, false) === false, 'closed, no proc, not fresh → not open');
   console.log('all checks passed');
 }
 
