@@ -22,10 +22,10 @@ const KEEP_GRACE_SEC = 600;    // keep a recently-active session even if livenes
 function classify(last, ageSec) {
   if (!last) return 'idle';
   const recent = ageSec < WORKING_SEC;
-  // Assistant had the last turn → your move once it's quiet: plain text = Claude finished, a
-  // pending tool_use = parked on a permission/question prompt. Both → 'ended' when stale so the
-  // scan gate can flag needs_input; a recent tool_use is Claude running tools = working.
-  if (last.role === 'assistant') return (last.isToolUse && recent) ? 'working' : 'ended';
+  // Assistant had the last turn: still writing (recent) = working; gone quiet = 'ended' so the
+  // scan gate can flag needs_input (finished and waiting, or parked on a permission/question
+  // prompt). Recency, not entry type, splits active work from waiting — text mid-turn is recent.
+  if (last.role === 'assistant') return recent ? 'working' : 'ended';
   return recent ? 'working' : 'idle';
 }
 
@@ -68,11 +68,11 @@ function liveProcs() {
 // failed → list everything rather than blank the dashboard.
 function listable(click, psOk, ageSec) { return !psOk || click || ageSec < KEEP_GRACE_SEC; }
 
-// An 'ended' session awaits input only if open. cwd is the only link to a live claude, so allow
-// the K newest transcripts per repo where K = live procs there; freshNewest keeps the just-ended
-// newest when liveness lagged a tick (self-heals once grace expires).
-function openForInput(rank, procsHere, inLiveCwd, freshNewest) {
-  return (inLiveCwd && rank < Math.max(procsHere, 1)) || freshNewest;
+// An 'ended' session awaits input only if it's open: cwd is the only link to a live claude (no
+// session-id exposed), so allow the K newest transcripts per repo where K = live procs there.
+// Liveness can't confirm it → idle (listed via grace), never a false needs_input.
+function openForInput(rank, procsHere, inLiveCwd) {
+  return inLiveCwd && rank < Math.max(procsHere, 1);
 }
 
 // Walk a shell pid up to the GUI .app that owns it, then raise it. pid is validated
@@ -237,8 +237,7 @@ function scan() {
       const inLiveCwd = !!(cwd && liveSet.has(cwd));
       const rank = rankOf.get(f);
       const procsHere = procs.filter(p => p.cwd === cwd).length;
-      const freshNewest = rank === 0 && ageSec < WORKING_SEC; // just ended; liveness may lag a tick
-      if (status === 'ended') status = openForInput(rank, procsHere, inLiveCwd, freshNewest) ? 'needs_input' : 'idle';
+      if (status === 'ended') status = openForInput(rank, procsHere, inLiveCwd) ? 'needs_input' : 'idle';
       // pid for click-to-focus: exact by --session-id when present, else any live proc in the repo
       let pid = null;
       const bySid = procs.find(p => p.sid === sid);
@@ -492,7 +491,7 @@ function serve() {
 
 function check() {
   const ok = (c, m) => { if (!c) throw new Error('FAIL: ' + m); console.log('ok:', m); };
-  ok(classify({ role: 'assistant', isToolUse: false }, 5) === 'ended', 'assistant text = ended (scan gates liveness)');
+  ok(classify({ role: 'assistant', isToolUse: false }, 5) === 'working', 'recent assistant text = still working, not needs_input');
   ok(classify({ role: 'assistant', isToolUse: false }, 3600) === 'ended', 'old assistant text = ended too');
   ok(classify({ role: 'assistant', isToolUse: true }, 5) === 'working', 'recent tool_use = working');
   ok(classify({ role: 'assistant', isToolUse: true }, 9999) === 'ended', 'stale tool_use = parked on a prompt (scan flags needs_input)');
@@ -511,12 +510,11 @@ function check() {
   ok(listable(false, true, 5) === true, 'recently-active session kept despite no liveness match');
   ok(listable(false, false, 9999) === true, 'ps failed → list everything (no blank dashboard)');
 
-  ok(openForInput(0, 1, true, false) === true, 'single live session → open');
-  ok(openForInput(1, 2, true, false) === true, '2nd of two live procs in a repo → open');
-  ok(openForInput(1, 1, true, false) === false, '2nd session but only 1 live proc → not open');
-  ok(openForInput(2, 2, true, false) === false, '3rd session, 2 live procs → not open');
-  ok(openForInput(0, 0, false, true) === true, 'just-ended newest, liveness lagged → open');
-  ok(openForInput(0, 0, false, false) === false, 'closed, no proc, not fresh → not open');
+  ok(openForInput(0, 1, true) === true, 'single live session → open');
+  ok(openForInput(1, 2, true) === true, '2nd of two live procs in a repo → open');
+  ok(openForInput(1, 1, true) === false, '2nd session but only 1 live proc → not open');
+  ok(openForInput(2, 2, true) === false, '3rd session, 2 live procs → not open');
+  ok(openForInput(0, 1, false) === false, 'no live proc → idle, never a false needs_input');
   console.log('all checks passed');
 }
 
