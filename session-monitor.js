@@ -9,8 +9,9 @@ const http = require('http');
 const fs = require('fs');
 const path = require('path');
 const cp = require('child_process');
+const os = require('os');
 
-const ROOT = path.join(process.env.HOME, '.claude', 'projects');
+const ROOT = path.join(os.homedir(), '.claude', 'projects'); // os.homedir() is cross-platform (HOME unset on Windows)
 const PORT = 4317;
 const WORKING_SEC = 90;        // active in last 90s = working
 const WINDOW_H = 24;           // only list sessions touched in last 24h
@@ -256,8 +257,8 @@ function ago(s) {
 
 // ---- header: rate limits + 30d token usage ----
 const LIMITS_FILES = [ // read freshest; capture file first, token-optimizer's as fallback
-  path.join(process.env.HOME, '.claude', 'monitor', 'rate-limits.json'),
-  path.join(process.env.HOME, '.claude', 'token-optimizer', 'rate-limits.json'),
+  path.join(os.homedir(), '.claude', 'monitor', 'rate-limits.json'),
+  path.join(os.homedir(), '.claude', 'token-optimizer', 'rate-limits.json'),
 ];
 
 let _tok = { t: 0, at: 0 };
