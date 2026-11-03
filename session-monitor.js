@@ -22,10 +22,9 @@ const KEEP_GRACE_SEC = 600;    // keep a recently-active session even if livenes
 function classify(last, ageSec) {
   if (!last) return 'idle';
   const recent = ageSec < WORKING_SEC;
-  // Assistant had the last turn → the ball is in your court once it goes quiet. Plain text
-  // = Claude finished talking; a tool_use left pending (no tool_result after it) = Claude
-  // parked on a permission / question prompt. Both become 'ended' when stale, so the scan
-  // gate can flag needs_input. A recent tool_use is Claude actively running tools = working.
+  // Assistant had the last turn → your move once it's quiet: plain text = Claude finished, a
+  // pending tool_use = parked on a permission/question prompt. Both → 'ended' when stale so the
+  // scan gate can flag needs_input; a recent tool_use is Claude running tools = working.
   if (last.role === 'assistant') return (last.isToolUse && recent) ? 'working' : 'ended';
   return recent ? 'working' : 'idle';
 }
@@ -69,10 +68,9 @@ function liveProcs() {
 // failed → list everything rather than blank the dashboard.
 function listable(click, psOk, ageSec) { return !psOk || click || ageSec < KEEP_GRACE_SEC; }
 
-// Does an 'ended' session actually await your input? cwd is the only link to a live claude
-// (no session-id exposed), so allow the K newest transcripts in a repo where K = live claude
-// procs there — K open sessions = K prompts, not just the single newest. freshNewest keeps the
-// just-ended newest even if liveness lagged this tick; it self-heals once grace expires.
+// An 'ended' session awaits input only if open. cwd is the only link to a live claude, so allow
+// the K newest transcripts per repo where K = live procs there; freshNewest keeps the just-ended
+// newest when liveness lagged a tick (self-heals once grace expires).
 function openForInput(rank, procsHere, inLiveCwd, freshNewest) {
   return (inLiveCwd && rank < Math.max(procsHere, 1)) || freshNewest;
 }
