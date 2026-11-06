@@ -11,7 +11,20 @@ const path = require('path');
 const cp = require('child_process');
 const os = require('os');
 
-const ROOT = path.join(os.homedir(), '.claude', 'projects'); // os.homedir() is cross-platform (HOME unset on Windows)
+// Every Claude config dir (~/.claude, ~/.claude-<account>, …) that holds a projects/ folder, so
+// sessions from all signed-in accounts show, not just the primary. os.homedir() is cross-platform.
+function ROOTS() {
+  const home = os.homedir(), rs = [];
+  try {
+    for (const n of fs.readdirSync(home)) {
+      if (n !== '.claude' && !n.startsWith('.claude-')) continue;
+      const p = path.join(home, n, 'projects');
+      try { if (fs.statSync(p).isDirectory()) rs.push(p); } catch {}
+    }
+  } catch {}
+  if (!rs.length) rs.push(path.join(home, '.claude', 'projects'));
+  return rs;
+}
 const PORT = process.env.SM_PORT || 4317;
 const WORKING_SEC = 90;        // active in last 90s = working
 const WINDOW_H = 24;           // only list sessions touched in last 24h
@@ -35,22 +48,40 @@ function classify(last, ageSec) {
 // ponytail: cwd match is coarse — many sessions per repo collapse to the newest one.
 let _live = { a: [], at: 0 };
 let _psOk = false; // did the last ps run succeed? gate the "drop closed" filter on it
-let _chromeExt = 0; // count of `claude --chrome-native-host` procs = active Claude-in-Chrome connections
+let _chromeExtProcs = []; // `claude --chrome-native-host` procs = Claude-in-Chrome connections (pid + uptime; no tab link exists)
+// A native-host bridge lingers for all of Chrome's session, so presence ≠ in use. It's actually
+// driving the browser only while its listener socket has an accepted peer: idle = 1 unix FD
+// (the listener), active = listener + connection(s).
+function hostActive(pid) {
+  try {
+    return cp.execSync(`lsof -a -p ${pid} -U 2>/dev/null`, { encoding: 'utf8' }).split('\n').filter(l => /\bunix\b/.test(l)).length > 1;
+  } catch { return false; }
+}
+// Collapse `ps` elapsed time ([[dd-]hh:]mm:ss) to a short label: "1d 4h" / "2h 5m" / "9m".
+function fmtEtime(e) {
+  let d = 0, rest = e;
+  if (e.includes('-')) { const p = e.split('-'); d = +p[0]; rest = p[1]; }
+  const parts = rest.split(':').map(Number);
+  const hh = parts.length === 3 ? parts[0] : 0, mm = parts.length === 3 ? parts[1] : (parts[0] || 0);
+  if (d) return d + 'd ' + hh + 'h';
+  if (hh) return hh + 'h ' + mm + 'm';
+  return mm + 'm';
+}
 function liveProcs() {
   if (Date.now() - _live.at < 8000) return _live.a;
   const a = [];
-  let ok = false, extN = 0;
+  let ok = false, ext = [];
   try {
-    const ps = cp.execSync('ps -eo pid,command', { encoding: 'utf8' }).split('\n');
+    const ps = cp.execSync('ps -eo pid,etime,command', { encoding: 'utf8' }).split('\n');
     ok = true;
     for (const ln of ps) {
       if (!/\bclaude\b/.test(ln)) continue;
-      if (/--chrome-native-host/.test(ln)) { extN++; continue; } // extension bridge, not an interactive session
-      // keep only interactive session procs; drop SDK agents, plugins, mem/mcp helpers
-      if (/stream-json|session-monitor|statusline-capture|\.py\b|\bnode \/|\bbun \/|claude-mem|worker-service|mcp-server|chroma|dashboard-server|inbox-wait|spool-forwarder/.test(ln)) continue;
-      const m = ln.trim().match(/^(\d+)\s+(.*)$/);
+      const m = ln.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/);
       if (!m) continue;
-      const pid = +m[1], cmd = m[2];
+      const pid = +m[1], etime = m[2], cmd = m[3];
+      if (/--chrome-native-host/.test(cmd)) { if (hostActive(pid)) ext.push({ pid, up: fmtEtime(etime) }); continue; } // extension bridge; show only while actively driving the browser
+      // keep only interactive session procs; drop SDK agents, plugins, mem/mcp helpers
+      if (/stream-json|session-monitor|statusline-capture|\.py\b|\bnode \/|\bbun \/|claude-mem|worker-service|mcp-server|chroma|dashboard-server|inbox-wait|spool-forwarder/.test(cmd)) continue;
       let cwd = null;
       try {
         const o = cp.execSync(`lsof -a -p ${pid} -d cwd -Fn 2>/dev/null`, { encoding: 'utf8' });
@@ -62,11 +93,11 @@ function liveProcs() {
     }
   } catch { /* ps unavailable */ }
   _psOk = ok;
-  _chromeExt = extN;
+  _chromeExtProcs = ext;
   _live = { a, at: Date.now() };
   return a;
 }
-function chromeExtCount() { liveProcs(); return _chromeExt; } // ensure a fresh ps scan, then read the count
+function chromeExt() { liveProcs(); return _chromeExtProcs; } // ensure a fresh ps scan, then read the connections
 
 // Keep a session only while it looks open: clickable (live proc or cmux tab), or touched within
 // KEEP_GRACE_SEC — liveness (ps/lsof/cmux) has gaps but an active session keeps writing. ps
@@ -202,12 +233,13 @@ function parseSession(lines) {
 
 function scan() {
   const now = Date.now();
-  const out = [];
-  let dirs = [];
-  try { dirs = fs.readdirSync(ROOT); } catch { return out; }
+  const byId = new Map(); // dedupe by session id: the same session can appear in >1 account dir (shares/backups)
   const procs = liveProcs();
   const liveSet = new Set(procs.map(p => p.cwd).filter(Boolean));
   const cmuxMap = cmuxSessions();
+  for (const ROOT of ROOTS()) {
+  let dirs = [];
+  try { dirs = fs.readdirSync(ROOT); } catch { continue; }
   for (const d of dirs) {
     if (d.includes('claude-mem-observer')) continue; // background observer sessions, never your input
     const dir = path.join(ROOT, d);
@@ -240,7 +272,8 @@ function scan() {
       else if (inLiveCwd) { const byCwd = procs.find(p => p.cwd === cwd); if (byCwd) pid = byCwd.pid; }
       const click = !!pid || cmuxMap.has(sid); // focusable: live proc in repo, or cmux holds the tab
       if (!listable(click, _psOk, ageSec)) continue; // closed: no live claude, not cmux-held, not recent → drop
-      out.push({
+      const prev = byId.get(sid);
+      if (!prev || ageSec < prev.ageSec) byId.set(sid, {
         id: sid,
         project: d.replace(/^-Users-[^-]+-/, '').replace(/-/g, '/'),
         title: title || '(no prompt yet)',
@@ -248,6 +281,8 @@ function scan() {
       });
     }
   }
+  }
+  const out = [...byId.values()];
   const rank = { needs_input: 0, working: 1, idle: 2 };
   out.sort((a, b) => (rank[a.status] - rank[b.status]) || (a.ageSec - b.ageSec));
   return out;
@@ -265,36 +300,35 @@ const LIMITS_FILES = [ // read freshest; capture file first, token-optimizer's a
   path.join(os.homedir(), '.claude', 'token-optimizer', 'rate-limits.json'),
 ];
 
-let _tok = { t: 0, at: 0 };
-// ponytail: full 30d rescan is O(files); memoize 60s so the 4s UI refresh stays cheap.
-function tokens30d() {
-  if (Date.now() - _tok.at < 60000) return _tok.t;
-  const cut = Date.now() - 30 * 86400000;
-  let sum = 0, dirs = [];
-  try { dirs = fs.readdirSync(ROOT); } catch { return _tok.t; }
-  for (const d of dirs) {
-    if (d.includes('claude-mem-observer')) continue;
-    const dir = path.join(ROOT, d);
-    let files; try { files = fs.readdirSync(dir); } catch { continue; }
-    for (const f of files) {
-      if (!f.endsWith('.jsonl')) continue;
-      const p = path.join(dir, f);
-      let st; try { st = fs.statSync(p); } catch { continue; }
-      if (st.mtimeMs < cut) continue;
-      let raw; try { raw = fs.readFileSync(p, 'utf8'); } catch { continue; }
-      for (const ln of raw.split('\n')) {
-        if (!ln.includes('"usage"')) continue;            // cheap pre-filter before JSON.parse
-        let x; try { x = JSON.parse(ln); } catch { continue; }
-        const u = x.message && x.message.usage;
-        if (!u) continue;
-        if (x.timestamp && Date.parse(x.timestamp) < cut) continue;
-        sum += (u.input_tokens || 0) + (u.output_tokens || 0) +
-          (u.cache_creation_input_tokens || 0) + (u.cache_read_input_tokens || 0);
-      }
+let _tok = { v: [], at: 0 };
+// Per-account token usage from each account's stats-cache.json (dailyModelTokens) — the same
+// source as the `/stats` command, not the transcripts (a local subset that undercounts). One
+// entry per distinct account; identical backup caches are skipped. Memoized 60s.
+function tokenUsage() {
+  if (Date.now() - _tok.at < 60000) return _tok.v;
+  const now = Date.now(), cut30 = now - 30 * 86400000, cut7 = now - 7 * 86400000;
+  const seen = new Set();
+  let main = null, sh7 = 0, sh30 = 0, hasShared = false; // main = ~/.claude; all other profiles roll up into "shared"
+  for (const ROOT of ROOTS()) {
+    const accDir = path.dirname(ROOT), base = path.basename(accDir);
+    let j; try { j = JSON.parse(fs.readFileSync(path.join(accDir, 'stats-cache.json'), 'utf8')); } catch { continue; }
+    const sig = j.lastComputedDate + '|' + j.totalMessages + '|' + j.firstSessionDate; // this account's cache identity
+    if (seen.has(sig)) continue; seen.add(sig); // a backup dir holds an identical cache — count once
+    let d7 = 0, d30 = 0;
+    for (const e of (j.dailyModelTokens || [])) {
+      const ts = e.date ? Date.parse(e.date) : NaN;
+      if (isNaN(ts) || ts < cut30) continue;
+      let day = 0; const tbm = e.tokensByModel || {}; for (const m in tbm) day += tbm[m] || 0;
+      d30 += day; if (ts >= cut7) d7 += day;
     }
+    if (base === '.claude') main = { name: 'main', d7, d30 };
+    else { sh7 += d7; sh30 += d30; hasShared = true; }
   }
-  _tok = { t: sum, at: Date.now() };
-  return sum;
+  const out = [];
+  if (main) out.push(main);
+  if (hasShared) out.push({ name: 'shared', d7: sh7, d30: sh30 });
+  _tok = { v: out, at: Date.now() };
+  return out;
 }
 
 function header() {
@@ -310,7 +344,7 @@ function header() {
     } : null;
     limits = { ok: true, five: mk(j.five_hour), week: mk(j.seven_day), ageSec: Math.round((now - (j.timestamp || 0)) / 1000) };
   } catch { /* file missing -> ok:false */ }
-  return { limits, tokens30d: tokens30d() };
+  return { limits, tokens: tokenUsage() };
 }
 
 function humic(n) {
@@ -371,7 +405,7 @@ details.old .grid{margin-top:8px}
 <div class="hdr"><h1>Claude Sessions</h1><div class="sub" id="sub">loading…</div></div>
 <div class="bar" id="bar"></div>
 <div class="stats" id="stats"></div>
-<div class="ctl"><button id="sortBtn"></button></div>
+<div class="ctl"><button id="sortBtn"></button><button id="soundBtn"></button><button id="snoozeMinBtn"></button><button id="snoozeBtn"></button></div>
 <div id="root"></div>
 <script>
 const C={working:'#34d399',needs_input:'#fbbf24',idle:'#6b7280'};
@@ -401,6 +435,7 @@ function sortSessions(a){
 let seen=null, actx;
 function beep(){
   try{actx=actx||new (window.AudioContext||window.webkitAudioContext)();
+    if(actx.state==='suspended')actx.resume(); // browsers start it suspended until a user gesture
     const o=actx.createOscillator(),g=actx.createGain();o.connect(g);g.connect(actx.destination);
     o.type='sine';o.frequency.value=880;const t=actx.currentTime;
     g.gain.setValueAtTime(0.0001,t);g.gain.exponentialRampToValueAtTime(0.2,t+0.01);
@@ -410,8 +445,9 @@ function beep(){
 function alertNew(need){
   const ids=need.map(x=>x.id);
   if(seen===null){seen=new Set(ids);return;} // no alert on first load
+  if(Date.now()<mutedUntil()) return; // snoozed: suppress, keep seen-set so still-waiting sessions re-fire when it ends
   for(const x of need) if(!seen.has(x.id)){
-    beep();
+    if(soundOn()) beep();
     if(window.Notification&&Notification.permission==='granted')
       try{new Notification('Claude needs input',{body:x.title+' · '+x.project});}catch(e){}
   }
@@ -429,11 +465,11 @@ function webCard(x){
     '<div class="meta">Chrome · claude.ai</div></div>'+
     '<span class="badge">web</span><span class="go">↗ open</span></div>';
 }
-function extCard(n){
-  return '<div class="card clk" style="--c:#8b5cf6" onclick="extFocus()" title="focus Chrome">'+
+function extCard(x){
+  return '<div class="card clk" style="--c:#8b5cf6" onclick="extFocus()" title="focus Chrome (extension has no tab link)">'+
     '<span class="dot live"></span>'+
     '<div class="mid"><div class="title">Claude in Chrome (extension)</div>'+
-    '<div class="meta">'+n+' active connection'+(n>1?'s':'')+'</div></div>'+
+    '<div class="meta">pid '+x.pid+' · up '+esc(x.up)+'</div></div>'+
     '<span class="badge">ext</span><span class="go">↗ open</span></div>';
 }
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
@@ -446,7 +482,7 @@ function renderStats(H){
     : tile(lab,'—', L.ok?('stale · '+fmtReset(L.ageSec)+' old'):'no rate-limits.json', true);
   h+=cell('Session (5h) left', L.five);
   h+=cell('Weekly (7d) left', L.week);
-  h+=tile('Tokens (30d)', humic(H.tokens30d), 'all local sessions');
+  (H.tokens||[]).forEach(t=>{h+=tile('Tokens · '+t.name, humic(t.d30), humic(t.d7)+' · 7d');});
   document.getElementById('stats').innerHTML=h;
 }
 const OLD=7200; // idle sessions older than 2h collapse into "older"
@@ -457,28 +493,41 @@ async function tick(){
     renderStats(resp.header);
     const d=resp.sessions;
     const web=resp.web||[];
-    const ext=resp.ext||0;
+    const ext=resp.ext||[];
     const need=sortSessions(d.filter(x=>x.status==='needs_input'));
     const rest=d.filter(x=>x.status!=='needs_input');
     const old=sortSessions(rest.filter(x=>x.status==='idle'&&x.ageSec>OLD));
     const active=sortSessions(rest.filter(x=>!(x.status==='idle'&&x.ageSec>OLD)));
     const n=need.length;
-    alertNew(need);
+    alertNew(need);updSnoozeBtn();
     document.getElementById('sub').textContent=
-      d.length+' active · '+n+' need input'+(n?'  ⚠':'')+(web.length?' · '+web.length+' web':'')+(ext?' · chrome ext':'');
+      d.length+' active · '+n+' need input'+(n?'  ⚠':'')+(web.length?' · '+web.length+' web':'')+(ext.length?' · '+ext.length+' chrome ext':'');
     document.title=(n?'('+n+') ':'')+'Claude Sessions';
     let h='';
     if(need.length)h+='<div class="secl">needs your input</div><div class="grid">'+need.map(card).join('')+'</div>';
     if(active.length)h+='<div class="secl">running / idle</div><div class="grid">'+active.map(card).join('')+'</div>';
-    if(web.length||ext)h+='<div class="secl">web (Chrome)</div><div class="grid">'+(ext?extCard(ext):'')+web.map(webCard).join('')+'</div>';
+    if(web.length||ext.length)h+='<div class="secl">web (Chrome)</div><div class="grid">'+ext.map(extCard).join('')+web.map(webCard).join('')+'</div>';
     if(old.length)h+='<details class="old"><summary>older idle ('+old.length+')</summary><div class="grid">'+old.map(card).join('')+'</div></details>';
-    if(!d.length&&!web.length&&!ext)h='<div class="empty">no sessions active in last 24h</div>';
+    if(!d.length&&!web.length&&!ext.length)h='<div class="empty">no sessions active in last 24h</div>';
     document.getElementById('root').innerHTML=h;
   }catch(e){setBar('disconnected — monitor not responding. retrying…');}
 }
+const SNOOZE_OPTS=[5,10,15,30,60];
+function soundOn(){try{return localStorage.getItem('sm-sound')!=='off';}catch(e){return true;}}
+function setSound(v){try{localStorage.setItem('sm-sound',v?'on':'off');}catch(e){}}
+function mutedUntil(){try{return +localStorage.getItem('sm-snooze')||0;}catch(e){return 0;}}
+function setMuted(ts){try{localStorage.setItem('sm-snooze',String(ts));}catch(e){}}
+function snoozeMin(){try{const v=+localStorage.getItem('sm-snoozemin');return SNOOZE_OPTS.includes(v)?v:10;}catch(e){return 10;}}
+function cycleSnoozeMin(){const n=SNOOZE_OPTS[(SNOOZE_OPTS.indexOf(snoozeMin())+1)%SNOOZE_OPTS.length];try{localStorage.setItem('sm-snoozemin',String(n));}catch(e){}}
 function updSortBtn(){document.getElementById('sortBtn').textContent='sort: '+sortMode();}
+function updSoundBtn(){document.getElementById('soundBtn').textContent='sound: '+(soundOn()?'on':'off');}
+function updSnoozeMinBtn(){document.getElementById('snoozeMinBtn').textContent='snooze len: '+snoozeMin()+'m';}
+function updSnoozeBtn(){const rem=mutedUntil()-Date.now();document.getElementById('snoozeBtn').textContent=rem>0?'snoozed '+Math.ceil(rem/60000)+'m ✕':'snooze '+snoozeMin()+'m';}
 document.getElementById('sortBtn').onclick=()=>{setSort(sortMode()==='recent'?'project':'recent');updSortBtn();tick();};
-updSortBtn();
+document.getElementById('soundBtn').onclick=()=>{const on=!soundOn();setSound(on);updSoundBtn();if(on)beep();};
+document.getElementById('snoozeMinBtn').onclick=()=>{cycleSnoozeMin();updSnoozeMinBtn();updSnoozeBtn();};
+document.getElementById('snoozeBtn').onclick=()=>{if(mutedUntil()>Date.now())setMuted(0);else{setMuted(Date.now()+snoozeMin()*60000);seen=new Set();}updSnoozeBtn();};
+updSortBtn();updSoundBtn();updSnoozeMinBtn();updSnoozeBtn();
 if(window.Notification&&Notification.permission==='default')Notification.requestPermission().catch(()=>{});
 tick();setInterval(tick,4000);
 </script></body></html>`;
@@ -560,7 +609,7 @@ function serve() {
   http.createServer((req, res) => {
     if (req.url.startsWith('/api/sessions')) {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ header: header(), sessions: scan(), web: chromeTabs(), ext: chromeExtCount() }));
+      res.end(JSON.stringify({ header: header(), sessions: scan(), web: chromeTabs(), ext: chromeExt() }));
     } else if (req.url.startsWith('/focus')) {
       const u = new URL(req.url, 'http://x');
       if (u.searchParams.get('chrome')) { // extension: focus a claude.ai tab if open, else raise Chrome
@@ -630,7 +679,7 @@ function tui() {
   function draw() {
     const d = scan();
     const web = chromeTabs();
-    const ext = chromeExtCount();
+    const ext = chromeExt();
     const need = d.filter(x => x.status === 'needs_input');
     const rest = d.filter(x => x.status !== 'needs_input');
     const H = header(), L = H.limits, fresh = L.ok && L.ageSec < 3600;
@@ -649,9 +698,9 @@ function tui() {
     const put = (text, pid, id, web) => { lines.push(text); pids.push(pid || null); ids.push(id || null); webs.push(web || null); };
     put(B + 'Claude Sessions' + R + '  \x1b[90m' + d.length + ' active · ' +
       (need.length ? A.needs_input + need.length + ' need input ←' + R : '0 need input') +
-      (web.length ? ' · ' + web.length + ' web' : '') + (ext ? ' · chrome ext' : '') +
+      (web.length ? ' · ' + web.length + ' web' : '') + (ext.length ? ' · ' + ext.length + ' chrome ext' : '') +
       '  \x1b[90m(' + new Date().toLocaleTimeString() + ', click a ↗ row, ctrl-c quits)' + R);
-    put('\x1b[90m' + lc('5h:', L.five) + '   ' + lc('7d:', L.week) + '   30d tokens: ' + B + humic(H.tokens30d) + R);
+    put('\x1b[90m' + lc('5h:', L.five) + '   ' + lc('7d:', L.week) + (H.tokens||[]).map(t=>'   ' + t.name + ' 30d: ' + B + humic(t.d30) + R + '\x1b[90m').join('') + R);
     put('');
     if (need.length) {
       put(B + '── needs your input ──' + R);
@@ -662,15 +711,15 @@ function tui() {
       put('\x1b[90m── running / idle ──' + R);
       rest.forEach(x => put(row(x), x.pid, x.click ? x.id : null));
     }
-    if (web.length || ext) {
+    if (web.length || ext.length) {
       put('');
       put('\x1b[95m── web (Chrome) ──' + R);
-      if (ext) put(' \x1b[35m●' + R + ' \x1b[35m' + 'ext'.padEnd(11) + R + ' \x1b[90m    ' + R +
+      ext.forEach(x => put(' \x1b[35m●' + R + ' \x1b[35m' + 'ext'.padEnd(11) + R + ' \x1b[90m    ' + R +
         '  \x1b[35m' + (U + 'Claude in Chrome (extension)' + R + ' ↗').padEnd(55) + R +
-        ' \x1b[90m' + ext + ' connection' + (ext > 1 ? 's' : '') + R, null, null, { chrome: true });
+        ' \x1b[90mpid ' + x.pid + ' · up ' + x.up + R, null, null, { chrome: true }));
       web.forEach(x => put(webRow(x), null, null, x.cdp ? { cdp: x.cdp } : { w: x.w, t: x.t }));
     }
-    if (!d.length && !web.length && !ext) put('\x1b[90m  no sessions active in last 24h' + R);
+    if (!d.length && !web.length && !ext.length) put('\x1b[90m  no sessions active in last 24h' + R);
     linePid = pids; lineId = ids; lineWeb = webs;
     process.stdout.write('\x1b[2J\x1b[H' + lines.join('\n'));
   }

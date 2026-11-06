@@ -45,9 +45,11 @@ The web dashboard:
 
 - Groups sessions into **needs your input**, **running / idle**, and a collapsed **older idle** section.
 - Shows a tab-title badge (e.g. `(2) Claude Sessions`) so you notice waiting sessions from another tab.
-- Fires a desktop notification and a short beep when a session newly starts waiting on you (grant notification permission when prompted; the browser may keep the beep muted until you interact with the tab once).
+- Fires a desktop notification and a short beep when a session newly starts waiting on you (grant notification permission when prompted; click **sound: on** once to unlock audio).
+- Lets you toggle the beep (**sound**) and **snooze** alerts for an adjustable interval (5–60 min), after which still-waiting sessions re-alert.
 - Lets you sort by most-recent activity or by project, and click a session to focus its window.
 - Shows a banner if it loses contact with the local server instead of silently showing stale data.
+- Shows token usage per account (from each profile's `/stats` cache), split into **main** and **shared**.
 
 ## How status is determined
 
@@ -58,6 +60,10 @@ The monitor reads your local session transcripts under `~/.claude/projects/*.jso
 - **idle** — quiet for longer.
 
 Only sessions touched in the last 24 hours are listed.
+
+### Multiple accounts
+
+If you run several Claude profiles (separate config dirs like `~/.claude` and `~/.claude-work`), the monitor scans them all, so sessions from every signed-in account show — not just the primary. Identical backup copies of a profile are deduplicated.
 
 ## Click-to-focus
 
