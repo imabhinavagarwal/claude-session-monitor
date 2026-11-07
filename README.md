@@ -75,25 +75,14 @@ Clicking a session tries to raise the exact terminal window it runs in. How prec
 | iTerm2 / Terminal.app | Focuses the exact tab (requires macOS Automation permission the first time). |
 | Warp and others | Raises the app (no per-tab API available). |
 
-## Claude in Chrome / web sessions
-
-The dashboard also lists Claude sessions open in your browser (claude.ai tabs) and shows when the Claude-in-Chrome extension is running, each with click-to-focus.
-
-- **macOS** — works out of the box (AppleScript; the first scan/click asks for Automation permission to control Google Chrome).
-- **Linux / Windows** — start Chrome with `--remote-debugging-port=9222`; the monitor then reads tabs over Chrome's local DevTools endpoint. (Override the port with `CHROME_CDP_PORT`.)
-
-Clicking a web row focuses that tab; the extension row focuses an open claude.ai tab, or raises Chrome.
-
-**Security:** `--remote-debugging-port` lets any local process control Chrome. Enable it only if you accept that, and not on shared machines.
-
 ## Privacy
 
-Everything runs locally. The monitor reads your own session files, and — for the web section — the titles and URLs of your open Chrome tabs (via AppleScript on macOS, or Chrome's `localhost` DevTools endpoint elsewhere). It serves the dashboard on `localhost` only, makes no outbound internet requests, and sends nothing anywhere.
+Everything runs locally. The monitor reads your own session files on your machine and serves the dashboard on `localhost` only. It makes no outbound network requests and sends nothing anywhere.
 
 ## Requirements
 
 - Node.js 18 or newer.
-- The dashboard works anywhere Node runs. Click-to-focus and the Chrome/web section are macOS-first; on Linux/Windows the web section needs Chrome's remote-debugging port, and terminal click-to-focus is macOS-only.
+- The dashboard works anywhere Node runs. Terminal click-to-focus is macOS-only.
 
 ## Feedback
 

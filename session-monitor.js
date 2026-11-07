@@ -48,40 +48,20 @@ function classify(last, ageSec) {
 // ponytail: cwd match is coarse — many sessions per repo collapse to the newest one.
 let _live = { a: [], at: 0 };
 let _psOk = false; // did the last ps run succeed? gate the "drop closed" filter on it
-let _chromeExtProcs = []; // `claude --chrome-native-host` procs = Claude-in-Chrome connections (pid + uptime; no tab link exists)
-// A native-host bridge lingers for all of Chrome's session, so presence ≠ in use. It's actually
-// driving the browser only while its listener socket has an accepted peer: idle = 1 unix FD
-// (the listener), active = listener + connection(s).
-function hostActive(pid) {
-  try {
-    return cp.execSync(`lsof -a -p ${pid} -U 2>/dev/null`, { encoding: 'utf8' }).split('\n').filter(l => /\bunix\b/.test(l)).length > 1;
-  } catch { return false; }
-}
-// Collapse `ps` elapsed time ([[dd-]hh:]mm:ss) to a short label: "1d 4h" / "2h 5m" / "9m".
-function fmtEtime(e) {
-  let d = 0, rest = e;
-  if (e.includes('-')) { const p = e.split('-'); d = +p[0]; rest = p[1]; }
-  const parts = rest.split(':').map(Number);
-  const hh = parts.length === 3 ? parts[0] : 0, mm = parts.length === 3 ? parts[1] : (parts[0] || 0);
-  if (d) return d + 'd ' + hh + 'h';
-  if (hh) return hh + 'h ' + mm + 'm';
-  return mm + 'm';
-}
 function liveProcs() {
   if (Date.now() - _live.at < 8000) return _live.a;
   const a = [];
-  let ok = false, ext = [];
+  let ok = false;
   try {
-    const ps = cp.execSync('ps -eo pid,etime,command', { encoding: 'utf8' }).split('\n');
+    const ps = cp.execSync('ps -eo pid,command', { encoding: 'utf8' }).split('\n');
     ok = true;
     for (const ln of ps) {
       if (!/\bclaude\b/.test(ln)) continue;
-      const m = ln.trim().match(/^(\d+)\s+(\S+)\s+(.*)$/);
-      if (!m) continue;
-      const pid = +m[1], etime = m[2], cmd = m[3];
-      if (/--chrome-native-host/.test(cmd)) { if (hostActive(pid)) ext.push({ pid, up: fmtEtime(etime) }); continue; } // extension bridge; show only while actively driving the browser
       // keep only interactive session procs; drop SDK agents, plugins, mem/mcp helpers
-      if (/stream-json|session-monitor|statusline-capture|\.py\b|\bnode \/|\bbun \/|claude-mem|worker-service|mcp-server|chroma|dashboard-server|inbox-wait|spool-forwarder/.test(cmd)) continue;
+      if (/stream-json|session-monitor|statusline-capture|\.py\b|\bnode \/|\bbun \/|claude-mem|worker-service|mcp-server|chroma|dashboard-server|inbox-wait|spool-forwarder/.test(ln)) continue;
+      const m = ln.trim().match(/^(\d+)\s+(.*)$/);
+      if (!m) continue;
+      const pid = +m[1], cmd = m[2];
       let cwd = null;
       try {
         const o = cp.execSync(`lsof -a -p ${pid} -d cwd -Fn 2>/dev/null`, { encoding: 'utf8' });
@@ -93,11 +73,9 @@ function liveProcs() {
     }
   } catch { /* ps unavailable */ }
   _psOk = ok;
-  _chromeExtProcs = ext;
   _live = { a, at: Date.now() };
   return a;
 }
-function chromeExt() { liveProcs(); return _chromeExtProcs; } // ensure a fresh ps scan, then read the connections
 
 // Keep a session only while it looks open: clickable (live proc or cmux tab), or touched within
 // KEEP_GRACE_SEC — liveness (ps/lsof/cmux) has gaps but an active session keeps writing. ps
@@ -455,23 +433,6 @@ function alertNew(need){
 }
 function setBar(msg){const b=document.getElementById('bar');if(msg){b.textContent=msg;b.classList.add('on');}else b.classList.remove('on');}
 function winFocus(el){fetch('/focus?id='+encodeURIComponent(el.dataset.id)+'&pid='+el.dataset.pid).catch(()=>{})}
-function webFocus(el){const q=el.dataset.cdp?'cdp='+encodeURIComponent(el.dataset.cdp):'web=1&w='+el.dataset.w+'&t='+el.dataset.t;fetch('/focus?'+q).catch(()=>{})}
-function extFocus(){fetch('/focus?chrome=1').catch(()=>{})}
-function webCard(x){
-  const foc=x.cdp?'data-cdp="'+esc(x.cdp)+'"':'data-w="'+x.w+'" data-t="'+x.t+'"';
-  return '<div class="card clk" style="--c:#8b5cf6" '+foc+' onclick="webFocus(this)" title="click to focus this Chrome tab">'+
-    '<span class="dot"></span>'+
-    '<div class="mid"><div class="title">'+esc(x.title)+'</div>'+
-    '<div class="meta">Chrome · claude.ai</div></div>'+
-    '<span class="badge">web</span><span class="go">↗ open</span></div>';
-}
-function extCard(x){
-  return '<div class="card clk" style="--c:#8b5cf6" onclick="extFocus()" title="focus Chrome (extension has no tab link)">'+
-    '<span class="dot live"></span>'+
-    '<div class="mid"><div class="title">Claude in Chrome (extension)</div>'+
-    '<div class="meta">pid '+x.pid+' · up '+esc(x.up)+'</div></div>'+
-    '<span class="badge">ext</span><span class="go">↗ open</span></div>';
-}
 function esc(s){return String(s).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]))}
 function humic(n){return n>=1e9?(n/1e9).toFixed(1)+'B':n>=1e6?(n/1e6).toFixed(1)+'M':n>=1e3?(n/1e3).toFixed(1)+'K':''+n}
 function fmtReset(s){return s>=86400?Math.round(s/86400)+'d':s>=3600?(s/3600).toFixed(1)+'h':Math.round(s/60)+'m'}
@@ -492,8 +453,6 @@ async function tick(){
     setBar('');
     renderStats(resp.header);
     const d=resp.sessions;
-    const web=resp.web||[];
-    const ext=resp.ext||[];
     const need=sortSessions(d.filter(x=>x.status==='needs_input'));
     const rest=d.filter(x=>x.status!=='needs_input');
     const old=sortSessions(rest.filter(x=>x.status==='idle'&&x.ageSec>OLD));
@@ -501,14 +460,13 @@ async function tick(){
     const n=need.length;
     alertNew(need);updSnoozeBtn();
     document.getElementById('sub').textContent=
-      d.length+' active · '+n+' need input'+(n?'  ⚠':'')+(web.length?' · '+web.length+' web':'')+(ext.length?' · '+ext.length+' chrome ext':'');
+      d.length+' active · '+n+' need input'+(n?'  ⚠':'');
     document.title=(n?'('+n+') ':'')+'Claude Sessions';
     let h='';
     if(need.length)h+='<div class="secl">needs your input</div><div class="grid">'+need.map(card).join('')+'</div>';
     if(active.length)h+='<div class="secl">running / idle</div><div class="grid">'+active.map(card).join('')+'</div>';
-    if(web.length||ext.length)h+='<div class="secl">web (Chrome)</div><div class="grid">'+ext.map(extCard).join('')+web.map(webCard).join('')+'</div>';
     if(old.length)h+='<details class="old"><summary>older idle ('+old.length+')</summary><div class="grid">'+old.map(card).join('')+'</div></details>';
-    if(!d.length&&!web.length&&!ext.length)h='<div class="empty">no sessions active in last 24h</div>';
+    if(!d.length)h='<div class="empty">no sessions active in last 24h</div>';
     document.getElementById('root').innerHTML=h;
   }catch(e){setBar('disconnected — monitor not responding. retrying…');}
 }
@@ -532,105 +490,14 @@ if(window.Notification&&Notification.permission==='default')Notification.request
 tick();setInterval(tick,4000);
 </script></body></html>`;
 
-// --- Claude-in-Chrome web sessions: list claude.ai tabs + focus them (macOS only, no status) ---
-// The extension keeps no local transcript, so these have no working/idle state — only presence.
-const CHROME_LIST = `if application "Google Chrome" is running then
-  tell application "Google Chrome"
-    set out to ""
-    set wi to 0
-    repeat with w in windows
-      set wi to wi + 1
-      set ti to 0
-      repeat with tb in tabs of w
-        set ti to ti + 1
-        if (URL of tb) contains "claude.ai" then set out to out & wi & (character id 9) & ti & (character id 9) & (title of tb) & (character id 9) & (URL of tb) & (character id 10)
-      end repeat
-    end repeat
-    return out
-  end tell
-end if`;
-function parseChromeTabs(raw) {
-  const tabs = [];
-  for (const ln of String(raw).split('\n')) {
-    if (!ln.trim()) continue;
-    const p = ln.split('\t');
-    if (p.length < 4) continue;
-    const w = p[0], t = p[1], url = p[p.length - 1], title = p.slice(2, -1).join(' '); // title may contain tabs
-    if (!url.includes('claude.ai')) continue;
-    tabs.push({ id: 'chrome-' + w + '-' + t, w: +w, t: +t, title: title.trim() || 'Claude', url: url.trim() });
-  }
-  return tabs;
-}
-// Chrome tabs via CDP (DevTools HTTP endpoint — any OS with --remote-debugging-port) or osascript
-// on macOS. Refreshed in the background: osascript is synchronous and can hang on the first
-// Automation prompt, so it must never run inside a request — serve the cached list.
-const CDP_PORT = process.env.CHROME_CDP_PORT || 9222;
-function cdpGet(pathname, cb) { // GET from DevTools; cb(parsedJSON) or cb(null) on any failure
-  const req = http.get({ host: '127.0.0.1', port: CDP_PORT, path: pathname, timeout: 1200 }, res => {
-    let s = ''; res.on('data', d => s += d); res.on('end', () => { try { cb(JSON.parse(s)); } catch { cb(null); } });
-  });
-  req.on('error', () => cb(null));
-  req.on('timeout', () => { req.destroy(); cb(null); });
-}
-function cdpActivate(id) { cdpGet('/json/activate/' + encodeURIComponent(id), () => {}); return 'cdp'; } // fire-and-forget
-let _chromeTabs = [];
-function refreshChrome() {
-  cdpGet('/json', arr => {
-    if (Array.isArray(arr)) { // CDP up (any OS): list claude.ai pages, focus by target id
-      _chromeTabs = arr.filter(x => x.type === 'page' && /claude\.ai/.test(x.url || ''))
-        .map(x => ({ id: 'cdp-' + x.id, cdp: x.id, title: (x.title || 'Claude').trim(), url: x.url }));
-      return;
-    }
-    if (process.platform !== 'darwin') { _chromeTabs = []; return; } // no osascript off macOS
-    cp.execFile('osascript', ['-e', CHROME_LIST], { timeout: 4000 }, (err, out) => {
-      if (!err) _chromeTabs = parseChromeTabs(out || ''); // Chrome closed → '' → []; denied → keep last
-    });
-  });
-}
-function chromeTabs() { return _chromeTabs; }
-function focusChromeTab(w, t) {
-  const s = `tell application "Google Chrome"
-  set active tab index of window ${w} to ${t}
-  set index of window ${w} to 1
-  activate
-end tell`;
-  try { cp.execFileSync('osascript', ['-e', s], { stdio: ['ignore', 'ignore', 'pipe'] }); return 'chrome'; } catch { return 'chrome-fail'; }
-}
-function focusChrome() { // raise Chrome itself — the extension has no tab to focus
-  try { cp.execFileSync('osascript', ['-e', 'tell application "Google Chrome" to activate'], { stdio: ['ignore', 'ignore', 'pipe'] }); return 'chrome'; } catch { return 'chrome-fail'; }
-}
-function focusChromeExt() { // extension has no tab of its own; land on a claude.ai tab if open, else raise Chrome
-  const t = chromeTabs()[0];
-  if (!t) return focusChrome();
-  return t.cdp ? cdpActivate(t.cdp) : focusChromeTab(t.w, t.t);
-}
 
 function serve() {
   http.createServer((req, res) => {
     if (req.url.startsWith('/api/sessions')) {
       res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(JSON.stringify({ header: header(), sessions: scan(), web: chromeTabs(), ext: chromeExt() }));
+      res.end(JSON.stringify({ header: header(), sessions: scan() }));
     } else if (req.url.startsWith('/focus')) {
       const u = new URL(req.url, 'http://x');
-      if (u.searchParams.get('chrome')) { // extension: focus a claude.ai tab if open, else raise Chrome
-        res.writeHead(200, { 'content-type': 'text/plain' });
-        res.end(focusChromeExt());
-        return;
-      }
-      const cdp = u.searchParams.get('cdp');
-      if (cdp) { // focus a claude.ai tab by DevTools target id, whitelisted against current tabs
-        const okCdp = chromeTabs().some(x => x.cdp === cdp);
-        res.writeHead(okCdp ? 200 : 400, { 'content-type': 'text/plain' });
-        res.end(okCdp ? cdpActivate(cdp) : 'bad');
-        return;
-      }
-      if (u.searchParams.get('web')) { // focus a Claude-in-Chrome tab, whitelisted against current tabs
-        const w = parseInt(u.searchParams.get('w'), 10), t = parseInt(u.searchParams.get('t'), 10);
-        const okWeb = chromeTabs().some(x => x.w === w && x.t === t);
-        res.writeHead(okWeb ? 200 : 400, { 'content-type': 'text/plain' });
-        res.end(okWeb ? focusChromeTab(w, t) : 'bad');
-        return;
-      }
       const id = u.searchParams.get('id') || '';
       const pid = parseInt(u.searchParams.get('pid'), 10);
       const okPid = Number.isInteger(pid) && liveProcs().some(p => p.pid === pid); // whitelist live pid
@@ -643,7 +510,6 @@ function serve() {
       res.end(PAGE);
     }
   }).listen(PORT, () => console.log(`Claude session monitor → http://localhost:${PORT}`));
-  refreshChrome(); setInterval(refreshChrome, 5000); // background Chrome-tab scan, never blocks a request
 }
 
 function check() {
@@ -655,8 +521,6 @@ function check() {
   ok(classify({ role: 'user', isToolUse: false }, 5) === 'working', 'recent user = working');
   ok(classify({ role: 'user', isToolUse: false }, 9999) === 'idle', 'stale user = idle');
   ok(classify(null, 5) === 'idle', 'no entry = idle');
-  const ct = parseChromeTabs('1\t2\tClaude chat\thttps://claude.ai/chat/abc\n1\t3\tGoogle\thttps://google.com\n');
-  ok(ct.length === 1 && ct[0].w === 1 && ct[0].t === 2 && ct[0].id === 'chrome-1-2', 'chrome tabs: keeps claude.ai, drops others, parses w/t');
   const { title, last } = parseSession([
     JSON.stringify({ type: 'user', message: { role: 'user', content: 'fix the bug' } }),
     JSON.stringify({ type: 'assistant', message: { role: 'assistant', content: [{ type: 'text', text: 'done' }] } }),
@@ -675,11 +539,9 @@ function check() {
 function tui() {
   const A = { working: '\x1b[32m', needs_input: '\x1b[33m', idle: '\x1b[90m' }; // green/amber/grey
   const R = '\x1b[0m', B = '\x1b[1m', INV = '\x1b[7m', U = '\x1b[4m';
-  let linePid = [], lineId = [], lineWeb = []; // per screen row: clickable pid / session id / chrome {w,t}
+  let linePid = [], lineId = []; // per screen row: clickable pid + session id (null if none)
   function draw() {
     const d = scan();
-    const web = chromeTabs();
-    const ext = chromeExt();
     const need = d.filter(x => x.status === 'needs_input');
     const rest = d.filter(x => x.status !== 'needs_input');
     const H = header(), L = H.limits, fresh = L.ok && L.ageSec < 3600;
@@ -692,13 +554,10 @@ function tui() {
       return ' ' + dot + ' ' + lab + ' \x1b[90m' + ago(x.ageSec).padStart(4) + R +
         '  ' + A[x.status] + t.padEnd(x.click ? 55 : 46) + R + ' \x1b[90m' + x.project.slice(0, 26) + R;
     };
-    const webRow = x => ' ' + '\x1b[35m●' + R + ' \x1b[35m' + 'web'.padEnd(11) + R + ' \x1b[90m    ' + R +
-      '  \x1b[35m' + (U + x.title.slice(0, 44) + R + ' ↗').padEnd(55) + R + ' \x1b[90mChrome · claude.ai' + R;
-    const lines = [], pids = [], ids = [], webs = [];
-    const put = (text, pid, id, web) => { lines.push(text); pids.push(pid || null); ids.push(id || null); webs.push(web || null); };
+    const lines = [], pids = [], ids = [];
+    const put = (text, pid, id) => { lines.push(text); pids.push(pid || null); ids.push(id || null); };
     put(B + 'Claude Sessions' + R + '  \x1b[90m' + d.length + ' active · ' +
       (need.length ? A.needs_input + need.length + ' need input ←' + R : '0 need input') +
-      (web.length ? ' · ' + web.length + ' web' : '') + (ext.length ? ' · ' + ext.length + ' chrome ext' : '') +
       '  \x1b[90m(' + new Date().toLocaleTimeString() + ', click a ↗ row, ctrl-c quits)' + R);
     put('\x1b[90m' + lc('5h:', L.five) + '   ' + lc('7d:', L.week) + (H.tokens||[]).map(t=>'   ' + t.name + ' 30d: ' + B + humic(t.d30) + R + '\x1b[90m').join('') + R);
     put('');
@@ -711,16 +570,8 @@ function tui() {
       put('\x1b[90m── running / idle ──' + R);
       rest.forEach(x => put(row(x), x.pid, x.click ? x.id : null));
     }
-    if (web.length || ext.length) {
-      put('');
-      put('\x1b[95m── web (Chrome) ──' + R);
-      ext.forEach(x => put(' \x1b[35m●' + R + ' \x1b[35m' + 'ext'.padEnd(11) + R + ' \x1b[90m    ' + R +
-        '  \x1b[35m' + (U + 'Claude in Chrome (extension)' + R + ' ↗').padEnd(55) + R +
-        ' \x1b[90mpid ' + x.pid + ' · up ' + x.up + R, null, null, { chrome: true }));
-      web.forEach(x => put(webRow(x), null, null, x.cdp ? { cdp: x.cdp } : { w: x.w, t: x.t }));
-    }
-    if (!d.length && !web.length && !ext.length) put('\x1b[90m  no sessions active in last 24h' + R);
-    linePid = pids; lineId = ids; lineWeb = webs;
+    if (!d.length) put('\x1b[90m  no sessions active in last 24h' + R);
+    linePid = pids; lineId = ids;
     process.stdout.write('\x1b[2J\x1b[H' + lines.join('\n'));
   }
   if (!process.stdout.isTTY) { draw(); return; } // piped: one frame, no mouse
@@ -728,13 +579,12 @@ function tui() {
   process.stdin.setRawMode(true);
   process.stdin.resume();
   process.stdout.write('\x1b[?1000h\x1b[?1006h\x1b[?25l'); // enable SGR mouse click reporting, hide cursor
-  refreshChrome(); setInterval(refreshChrome, 5000); // background Chrome-tab scan for the web section
   process.stdin.on('data', buf => {
     const s = buf.toString('utf8');
     if (s.includes('\x03') || s === 'q') return done();         // ctrl-c / q
     const re = /\x1b\[<(\d+);(\d+);(\d+)M/g; let m;              // SGR mouse press
     while ((m = re.exec(s))) {
-      if ((+m[1] & 3) === 0) { const y = (+m[3]) - 1, pid = linePid[y], id = lineId[y], wb = lineWeb[y]; if (wb) { if (wb.chrome) focusChromeExt(); else if (wb.cdp) cdpActivate(wb.cdp); else focusChromeTab(wb.w, wb.t); } else if (id || pid) focusTarget(id, pid); } // left-button press
+      if ((+m[1] & 3) === 0) { const y = (+m[3]) - 1, pid = linePid[y], id = lineId[y]; if (id || pid) focusTarget(id, pid); } // left-button press
     }
   });
   process.on('SIGINT', done);
